@@ -10,6 +10,7 @@
 #include <string.h>
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -54,6 +55,12 @@ enum obs_text_type {
     OBS_TEXT_MULTILINE = 2,
 };
 
+enum obs_monitoring_type {
+    OBS_MONITORING_TYPE_NONE = 0,
+    OBS_MONITORING_TYPE_MONITOR_ONLY = 1,
+    OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT = 2,
+};
+
 #define OBS_SOURCE_VIDEO            (1 << 0)
 #define OBS_SOURCE_AUDIO            (1 << 1)
 #define OBS_SOURCE_ASYNC            (1 << 2)
@@ -61,6 +68,39 @@ enum obs_text_type {
 #define OBS_SOURCE_DO_NOT_DUPLICATE (1 << 8)
 
 #define LOG_INFO 300
+#define MAX_AV_PLANES 8
+
+enum obs_audio_format {
+    OBS_AUDIO_FORMAT_UNKNOWN = 0,
+    OBS_AUDIO_FORMAT_U8BIT = 1,
+    OBS_AUDIO_FORMAT_16BIT = 2,
+    OBS_AUDIO_FORMAT_32BIT = 3,
+    OBS_AUDIO_FORMAT_FLOAT = 4,
+    OBS_AUDIO_FORMAT_U8BIT_PLANAR = 5,
+    OBS_AUDIO_FORMAT_16BIT_PLANAR = 6,
+    OBS_AUDIO_FORMAT_32BIT_PLANAR = 7,
+    OBS_AUDIO_FORMAT_FLOAT_PLANAR = 8,
+};
+
+enum obs_speaker_layout {
+    OBS_SPEAKERS_UNKNOWN = 0,
+    OBS_SPEAKERS_MONO = 1,
+    OBS_SPEAKERS_STEREO = 2,
+    OBS_SPEAKERS_2POINT1 = 3,
+    OBS_SPEAKERS_4POINT0 = 4,
+    OBS_SPEAKERS_4POINT1 = 5,
+    OBS_SPEAKERS_5POINT1 = 6,
+    OBS_SPEAKERS_7POINT1 = 8,
+};
+
+struct obs_source_audio_pkt {
+    const uint8_t* data[MAX_AV_PLANES];
+    uint32_t frames;
+    enum obs_speaker_layout speakers;
+    enum obs_audio_format format;
+    uint32_t samples_per_sec;
+    uint64_t timestamp;
+};
 
 typedef void (*obs_source_enum_proc_t)(obs_source_t* parent, obs_source_t* child, void* param);
 typedef bool (*obs_property_clicked_t)(obs_properties_t* props, obs_property_t* property, void* data);
@@ -102,7 +142,7 @@ struct obs_source_info {
 };
 
 // ============================================================================
-// 2. 运行时动态绑定 obs.dll 导出函数 + FFmpeg avcodec_open2 IAT 零延迟钩子
+// 2. 运行时动态绑定 obs.dll 导出函数 + obs-ffmpeg.dll 零延迟与音频直通 IAT 钩子
 // ============================================================================
 static uint32_t(*p_obs_get_version)(void) = nullptr;
 static void (*p_blog)(int log_level, const char* format, ...) = nullptr;
@@ -121,6 +161,11 @@ static void (*p_obs_source_dec_showing)(obs_source_t* source) = nullptr;
 static void (*p_obs_source_inc_active)(obs_source_t* source) = nullptr;
 static void (*p_obs_source_dec_active)(obs_source_t* source) = nullptr;
 static void (*p_obs_source_set_async_unbuffered)(obs_source_t* source, bool unbuffered) = nullptr;
+static void (*p_obs_source_output_audio)(obs_source_t* source, const struct obs_source_audio_pkt* audio) = nullptr;
+static void (*p_obs_source_set_monitoring_type)(obs_source_t* source, enum obs_monitoring_type type) = nullptr;
+static void (*p_obs_source_set_muted)(obs_source_t* source, bool muted) = nullptr;
+static uint64_t(*p_os_gettime_ns)(void) = nullptr;
+static bool (*p_os_sleepto_ns)(uint64_t time_target) = nullptr;
 
 static obs_data_t* (*p_obs_data_create)(void) = nullptr;
 static void (*p_obs_data_release)(obs_data_t* data) = nullptr;
@@ -145,46 +190,89 @@ static obs_property_t* (*p_obs_properties_add_button)(obs_properties_t* props, c
     obs_property_clicked_t callback) = nullptr;
 static void (*p_obs_property_set_modified_callback)(obs_property_t* p, obs_property_modified_t modified) = nullptr;
 
+enum StreamMode {
+    MODE_SRT_LISTENER = 0,
+    MODE_SRT_CALLER = 1,
+    MODE_RTSP_PULL = 2,
+};
+
+struct LumenSourceContext {
+    obs_source_t* self = nullptr;
+    obs_source_t* ffmpeg_child = nullptr;
+    int mode = MODE_SRT_CALLER;
+    int srt_port = 10000;
+    int http_port = 8080;
+    int latency_ms = 50;
+    std::string selected_dev = "auto";
+    std::string phone_ip;
+    std::string current_uri;
+    bool is_active = false;
+    bool is_showing = false;
+    float scan_retry_timer = 0.0f;
+    uint64_t next_obs_audio_ts_ns = 0;
+    bool logged_first_audio = false;
+};
+
+static std::mutex g_ctx_registry_mutex;
+static std::vector<LumenSourceContext*> g_active_contexts;
+
+static void RegisterLumenContext(LumenSourceContext* ctx) {
+    if (!ctx) return;
+    std::lock_guard<std::mutex> lk(g_ctx_registry_mutex);
+    if (std::find(g_active_contexts.begin(), g_active_contexts.end(), ctx) == g_active_contexts.end()) {
+        g_active_contexts.push_back(ctx);
+    }
+}
+
+static void UnregisterLumenContext(LumenSourceContext* ctx) {
+    if (!ctx) return;
+    std::lock_guard<std::mutex> lk(g_ctx_registry_mutex);
+    g_active_contexts.erase(
+        std::remove(g_active_contexts.begin(), g_active_contexts.end(), ctx),
+        g_active_contexts.end());
+}
+
 typedef int (*avcodec_open2_fn)(void* avctx, const void* codec, void** options);
+typedef int (*avformat_find_stream_info_fn)(void* ic, void** options);
 typedef int (*av_opt_set_fn)(void* obj, const char* name, const char* val, int search_flags);
 typedef int (*av_dict_set_fn)(void** pm, const char* key, const char* value, int flags);
 typedef void (*av_dict_free_fn)(void** pm);
+typedef void (*obs_source_output_audio_fn)(obs_source_t* source, const struct obs_source_audio_pkt* audio);
+typedef bool (*os_sleepto_ns_fn)(uint64_t time_target);
 
 static avcodec_open2_fn Real_avcodec_open2 = nullptr;
+static avformat_find_stream_info_fn Real_avformat_find_stream_info = nullptr;
+static obs_source_output_audio_fn Real_obs_source_output_audio = nullptr;
+static os_sleepto_ns_fn Real_os_sleepto_ns = nullptr;
 static av_opt_set_fn p_av_opt_set = nullptr;
 static av_dict_set_fn p_av_dict_set = nullptr;
 static av_dict_free_fn p_av_dict_free = nullptr;
 static std::atomic<bool> g_hooks_installed{ false };
 
+// 钩子 1：强制 FFmpeg 解码器采用单线程零帧缓冲解码（移除 +fast 与 slice，保证完整去块滤波，彻底消除画面马赛克）
 static int Hooked_avcodec_open2(void* avctx, const void* codec, void** options) {
     if (avctx && p_av_opt_set) {
         p_av_opt_set(avctx, "threads", "1", 0);
-        p_av_opt_set(avctx, "thread_type", "slice", 0);
         p_av_opt_set(avctx, "flags", "+low_delay", 0);
-        p_av_opt_set(avctx, "flags2", "+fast", 0);
     }
 
     if (options && p_av_dict_set) {
         p_av_dict_set(options, "threads", "1", 0);
-        p_av_dict_set(options, "thread_type", "slice", 0);
         p_av_dict_set(options, "flags", "+low_delay", 0);
-        p_av_dict_set(options, "flags2", "+fast", 0);
         int ret = Real_avcodec_open2(avctx, codec, options);
         if (p_blog) {
-            p_blog(LOG_INFO, "[obs-lumen-source] Hooked avcodec_open2 (with dict): forced threads=1, slice, low_delay (ret=%d)", ret);
+            p_blog(LOG_INFO, "[obs-lumen-source] Hooked avcodec_open2: forced threads=1, low_delay (ret=%d)", ret);
         }
         return ret;
     }
     else if (p_av_dict_set && p_av_dict_free) {
         void* local_opts = nullptr;
         p_av_dict_set(&local_opts, "threads", "1", 0);
-        p_av_dict_set(&local_opts, "thread_type", "slice", 0);
         p_av_dict_set(&local_opts, "flags", "+low_delay", 0);
-        p_av_dict_set(&local_opts, "flags2", "+fast", 0);
         int ret = Real_avcodec_open2(avctx, codec, &local_opts);
         p_av_dict_free(&local_opts);
         if (p_blog) {
-            p_blog(LOG_INFO, "[obs-lumen-source] Hooked avcodec_open2 (null dict): forced threads=1, slice, low_delay (ret=%d)", ret);
+            p_blog(LOG_INFO, "[obs-lumen-source] Hooked avcodec_open2 (null dict): forced threads=1, low_delay (ret=%d)", ret);
         }
         return ret;
     }
@@ -192,7 +280,87 @@ static int Hooked_avcodec_open2(void* avctx, const void* codec, void** options) 
     return Real_avcodec_open2(avctx, codec, options);
 }
 
-static bool PatchModuleIatForAvcodecOpen2(HMODULE hModule) {
+// 钩子 2：在流信息探测期间保持 -nobuffer，确保首帧 IDR 与探测包完整保留在 packet_buffer 中，不在探测后篡改 ic->flags
+static int Hooked_avformat_find_stream_info(void* ic, void** options) {
+    if (ic && p_av_opt_set) {
+        p_av_opt_set(ic, "fflags", "-nobuffer", 0);
+        p_av_opt_set(ic, "probesize", "262144", 0);
+        p_av_opt_set(ic, "analyzeduration", "100000", 0);
+        p_av_opt_set(ic, "fpsprobesize", "0", 0);
+    }
+    int ret = Real_avformat_find_stream_info(ic, options);
+    if (p_blog) {
+        p_blog(LOG_INFO, "[obs-lumen-source] Hooked avformat_find_stream_info: instant probe completed (ret=%d)", ret);
+    }
+    return ret;
+}
+
+// 钩子 3：截断 obs-ffmpeg.dll 内部 mp_media_sleep 的时间戳休眠等待，让网络收到的帧即刻送显
+static bool Hooked_os_sleepto_ns(uint64_t time_target) {
+    if (p_os_gettime_ns && Real_os_sleepto_ns) {
+        uint64_t now = p_os_gettime_ns();
+        if (time_target > now + 1000000ULL) {
+            return Real_os_sleepto_ns(now + 500000ULL);
+        }
+    }
+    return Real_os_sleepto_ns ? Real_os_sleepto_ns(time_target) : true;
+}
+
+// 钩子 4：拦截 obs-ffmpeg.dll 向私有子源输出的解码音频，直接锚定到 libobs 混音窗口 (now - 50ms) 注入父源混音器音轨！
+static void Hooked_obs_source_output_audio(obs_source_t* source, const struct obs_source_audio_pkt* audio) {
+    if (source && audio && audio->frames > 0) {
+        obs_source_t* parent_target = nullptr;
+        uint64_t out_ts_ns = audio->timestamp;
+        bool log_first_packet = false;
+
+        {
+            std::lock_guard<std::mutex> lk(g_ctx_registry_mutex);
+            for (LumenSourceContext* ctx : g_active_contexts) {
+                if (ctx && ctx->ffmpeg_child == source && ctx->self != nullptr) {
+                    parent_target = ctx->self;
+                    uint64_t now_ns = p_os_gettime_ns ? p_os_gettime_ns() : audio->timestamp;
+                    uint32_t sr = (audio->samples_per_sec > 0) ? audio->samples_per_sec : 48000;
+                    uint64_t step_ns = (static_cast<uint64_t>(audio->frames) * 1000000000ULL) / sr;
+
+                    // 锚定到当前系统时钟前 50ms（恰好落在 libobs 音频混音线程的 [ts.start, ts.end] 窗口内），
+                    // 触发 libobs using_direct_ts = true 零等待直接混音；若突发包或断流偏差超过 [-180ms, +40ms] 则自动重锚定
+                    uint64_t target_anchor_ns = (now_ns > 50000000ULL) ? (now_ns - 50000000ULL) : now_ns;
+                    if (ctx->next_obs_audio_ts_ns == 0 ||
+                        ctx->next_obs_audio_ts_ns + 180000000ULL < now_ns ||
+                        ctx->next_obs_audio_ts_ns > now_ns + 40000000ULL) {
+                        ctx->next_obs_audio_ts_ns = target_anchor_ns;
+                        if (!ctx->logged_first_audio) {
+                            ctx->logged_first_audio = true;
+                            log_first_packet = true;
+                        }
+                    }
+
+                    out_ts_ns = ctx->next_obs_audio_ts_ns;
+                    ctx->next_obs_audio_ts_ns += step_ns;
+                    break;
+                }
+            }
+        }
+
+        if (parent_target && Real_obs_source_output_audio) {
+            if (log_first_packet && p_blog) {
+                p_blog(LOG_INFO,
+                    "[obs-lumen-source] First audio packet bridged to OBS mixer! sr=%u, frames=%u, speakers=%d, format=%d",
+                    audio->samples_per_sec, audio->frames, static_cast<int>(audio->speakers), static_cast<int>(audio->format));
+            }
+            obs_source_audio_pkt fixed_pkt = *audio;
+            fixed_pkt.timestamp = out_ts_ns;
+            Real_obs_source_output_audio(parent_target, &fixed_pkt);
+            return;
+        }
+    }
+
+    if (Real_obs_source_output_audio) {
+        Real_obs_source_output_audio(source, audio);
+    }
+}
+
+static bool PatchModuleIatForZeroLatencyAndAudio(HMODULE hModule) {
     if (!hModule) return false;
 
     uint8_t* base = reinterpret_cast<uint8_t*>(hModule);
@@ -233,19 +401,38 @@ static bool PatchModuleIatForAvcodecOpen2(HMODULE hModule) {
             if (IMAGE_SNAP_BY_ORDINAL(orig_thunk->u1.Ordinal)) continue;
 
             auto* by_name = reinterpret_cast<PIMAGE_IMPORT_BY_NAME>(base + orig_thunk->u1.AddressOfData);
-            if (strcmp(reinterpret_cast<const char*>(by_name->Name), "avcodec_open2") == 0) {
+            const char* fn_name = reinterpret_cast<const char*>(by_name->Name);
+
+            auto patch_slot = [&](void* hook_fn, void** orig_fn_out) {
                 DWORD old_prot = 0;
                 if (VirtualProtect(&iat_thunk->u1.Function, sizeof(ULONG_PTR), PAGE_EXECUTE_READWRITE, &old_prot)) {
                     uintptr_t cur_fn = static_cast<uintptr_t>(iat_thunk->u1.Function);
-                    if (cur_fn != reinterpret_cast<uintptr_t>(&Hooked_avcodec_open2)) {
-                        if (!Real_avcodec_open2) {
-                            Real_avcodec_open2 = reinterpret_cast<avcodec_open2_fn>(cur_fn);
+                    if (cur_fn != reinterpret_cast<uintptr_t>(hook_fn)) {
+                        if (*orig_fn_out == nullptr) {
+                            *orig_fn_out = reinterpret_cast<void*>(cur_fn);
                         }
-                        iat_thunk->u1.Function = reinterpret_cast<ULONG_PTR>(&Hooked_avcodec_open2);
+                        iat_thunk->u1.Function = reinterpret_cast<ULONG_PTR>(hook_fn);
                     }
                     VirtualProtect(&iat_thunk->u1.Function, sizeof(ULONG_PTR), old_prot, &old_prot);
                     patched = true;
                 }
+            };
+
+            if (strcmp(fn_name, "avcodec_open2") == 0) {
+                patch_slot(reinterpret_cast<void*>(&Hooked_avcodec_open2),
+                    reinterpret_cast<void**>(&Real_avcodec_open2));
+            }
+            else if (strcmp(fn_name, "avformat_find_stream_info") == 0) {
+                patch_slot(reinterpret_cast<void*>(&Hooked_avformat_find_stream_info),
+                    reinterpret_cast<void**>(&Real_avformat_find_stream_info));
+            }
+            else if (strcmp(fn_name, "os_sleepto_ns") == 0) {
+                patch_slot(reinterpret_cast<void*>(&Hooked_os_sleepto_ns),
+                    reinterpret_cast<void**>(&Real_os_sleepto_ns));
+            }
+            else if (strcmp(fn_name, "obs_source_output_audio") == 0) {
+                patch_slot(reinterpret_cast<void*>(&Hooked_obs_source_output_audio),
+                    reinterpret_cast<void**>(&Real_obs_source_output_audio));
             }
         }
     }
@@ -270,17 +457,17 @@ static void InstallLowLatencyFFmpegHook() {
                 if (_strnicmp(dll_name, "avformat", 8) == 0) {
                     HMODULE hAvFormat = GetModuleHandleA(dll_name);
                     if (hAvFormat) {
-                        PatchModuleIatForAvcodecOpen2(hAvFormat);
+                        PatchModuleIatForZeroLatencyAndAudio(hAvFormat);
                     }
                 }
             }
         }
     }
 
-    if (PatchModuleIatForAvcodecOpen2(hObsFfmpeg)) {
+    if (PatchModuleIatForZeroLatencyAndAudio(hObsFfmpeg)) {
         g_hooks_installed.store(true);
         if (p_blog) {
-            p_blog(LOG_INFO, "[obs-lumen-source] Installed zero-latency avcodec_open2 IAT hook on obs-ffmpeg.dll!");
+            p_blog(LOG_INFO, "[obs-lumen-source] Installed zero-latency & audio-bridge IAT hooks on obs-ffmpeg.dll!");
         }
     }
 }
@@ -334,6 +521,23 @@ static bool LoadObsFunctions() {
         GetProcAddress(hObs, "obs_property_set_modified_callback"));
     p_obs_source_set_async_unbuffered = reinterpret_cast<decltype(p_obs_source_set_async_unbuffered)>(
         GetProcAddress(hObs, "obs_source_set_async_unbuffered"));
+    p_obs_source_output_audio = reinterpret_cast<decltype(p_obs_source_output_audio)>(
+        GetProcAddress(hObs, "obs_source_output_audio"));
+    p_os_gettime_ns = reinterpret_cast<decltype(p_os_gettime_ns)>(
+        GetProcAddress(hObs, "os_gettime_ns"));
+    p_os_sleepto_ns = reinterpret_cast<decltype(p_os_sleepto_ns)>(
+        GetProcAddress(hObs, "os_sleepto_ns"));
+    p_obs_source_set_monitoring_type = reinterpret_cast<decltype(p_obs_source_set_monitoring_type)>(
+        GetProcAddress(hObs, "obs_source_set_monitoring_type"));
+    p_obs_source_set_muted = reinterpret_cast<decltype(p_obs_source_set_muted)>(
+        GetProcAddress(hObs, "obs_source_set_muted"));
+
+    if (!Real_obs_source_output_audio) {
+        Real_obs_source_output_audio = p_obs_source_output_audio;
+    }
+    if (!Real_os_sleepto_ns) {
+        Real_os_sleepto_ns = p_os_sleepto_ns;
+    }
 
     return true;
 }
@@ -347,7 +551,7 @@ struct DiscoveredNodeInfo {
     int srt_port = 10000;
     int rtsp_port = 8554;
     int http_port = 8080;
-    int latency_ms = 25;
+    int latency_ms = 50;
 };
 
 static std::mutex g_devices_mutex;
@@ -590,29 +794,8 @@ static void SendTallyToPhoneAsync(const std::string& ip, int http_port, const st
 }
 
 // ============================================================================
-// 4. OBS Source 生命周期：广播参数自动回填 + 允许用户手动修改覆盖
+// 4. OBS Source 生命周期：广播参数自动回填 + 自动开启扬声器监听 + 零延迟音视频直通
 // ============================================================================
-enum StreamMode {
-    MODE_SRT_LISTENER = 0,
-    MODE_SRT_CALLER = 1,
-    MODE_RTSP_PULL = 2,
-};
-
-struct LumenSourceContext {
-    obs_source_t* self = nullptr;
-    obs_source_t* ffmpeg_child = nullptr;
-    int mode = MODE_SRT_CALLER;
-    int srt_port = 10000;
-    int http_port = 8080;
-    int latency_ms = 25;
-    std::string selected_dev = "auto";
-    std::string phone_ip;
-    std::string current_uri;
-    bool is_active = false;
-    bool is_showing = false;
-    float scan_retry_timer = 0.0f;
-};
-
 static const char* lumen_source_get_name(void* type_data) {
     (void)type_data;
     return "Lumen Node Camera";
@@ -634,7 +817,9 @@ static void RebuildInternalMediaSource(LumenSourceContext* ctx) {
     InstallLowLatencyFFmpegHook();
 
     char url_buf[512] = { 0 };
-    int latency_us = ctx->latency_ms * 1000;
+    // 使用三元运算符替代 std::max，避免与 <windows.h> 的 max(a,b) 宏冲突导致 C2589 编译错误
+    int effective_latency_ms = (ctx->latency_ms > 80) ? ctx->latency_ms : 80;
+    int latency_us = effective_latency_ms * 1000;
 
     if (ctx->mode == MODE_RTSP_PULL) {
         if (ctx->phone_ip.empty()) return;
@@ -643,13 +828,14 @@ static void RebuildInternalMediaSource(LumenSourceContext* ctx) {
     }
     else if (ctx->mode == MODE_SRT_CALLER) {
         if (ctx->phone_ip.empty()) return;
+        // 采用 80ms SRT ARQ 重传窗口 + tlpktdrop=0（禁止主动丢弃迟到分片），彻底消除 Wi-Fi 空口抖动引起的残缺帧马赛克
         snprintf(url_buf, sizeof(url_buf),
-            "srt://%s:%d?mode=caller&latency=%d&rcvlatency=%d&peerlatency=%d&tlpktdrop=1&maxbw=0&oheadbw=100&rcvbuf=4194304",
+            "srt://%s:%d?mode=caller&latency=%d&rcvlatency=%d&peerlatency=%d&tlpktdrop=0&nakreport=1&maxbw=0&oheadbw=100&rcvbuf=8388608&timeout=1500000",
             ctx->phone_ip.c_str(), ctx->srt_port, latency_us, latency_us, latency_us);
     }
     else {
         snprintf(url_buf, sizeof(url_buf),
-            "srt://0.0.0.0:%d?mode=listener&latency=%d&rcvlatency=%d&peerlatency=%d&tlpktdrop=1&maxbw=0&oheadbw=100&rcvbuf=4194304",
+            "srt://0.0.0.0:%d?mode=listener&latency=%d&rcvlatency=%d&peerlatency=%d&tlpktdrop=0&nakreport=1&maxbw=0&oheadbw=100&rcvbuf=8388608&timeout=1500000",
             ctx->srt_port, latency_us, latency_us, latency_us);
     }
 
@@ -657,6 +843,7 @@ static void RebuildInternalMediaSource(LumenSourceContext* ctx) {
         return;
     }
     ctx->current_uri = url_buf;
+    ctx->next_obs_audio_ts_ns = 0;
 
     if (p_blog) {
         p_blog(LOG_INFO, "[obs-lumen-source] Connecting internal stream to: %s", url_buf);
@@ -681,7 +868,7 @@ static void RebuildInternalMediaSource(LumenSourceContext* ctx) {
     p_obs_data_set_int(settings, "speed_percent", 100);
     p_obs_data_set_string(
         settings, "ffmpeg_options",
-        "fflags=nobuffer flags=low_delay analyzeduration=1 fpsprobesize=0 probesize=2048 max_delay=0");
+        "probesize=262144 analyzeduration=100000 fpsprobesize=0 max_delay=0");
 
     if (!ctx->ffmpeg_child) {
         ctx->ffmpeg_child = p_obs_source_create_private("ffmpeg_source", "Lumen_Internal_FFmpeg", settings);
@@ -706,9 +893,14 @@ static void RebuildInternalMediaSource(LumenSourceContext* ctx) {
     p_obs_data_release(settings);
 }
 
+
 static void lumen_source_update(void* data, obs_data_t* settings) {
     auto* ctx = static_cast<LumenSourceContext*>(data);
     if (!ctx || !settings) return;
+
+    if (p_obs_source_set_monitoring_type && ctx->self) {
+        p_obs_source_set_monitoring_type(ctx->self, OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT);
+    }
 
     const char* selected_dev = p_obs_data_get_string(settings, "discovered_ip");
     const char* last_applied = p_obs_data_get_string(settings, "_last_applied_dev");
@@ -753,6 +945,19 @@ static void lumen_source_update(void* data, obs_data_t* settings) {
 static void* lumen_source_create(obs_data_t* settings, obs_source_t* source) {
     auto* ctx = new LumenSourceContext();
     ctx->self = source;
+    RegisterLumenContext(ctx);
+    if (source) {
+        if (p_obs_source_set_async_unbuffered) {
+            p_obs_source_set_async_unbuffered(source, true);
+        }
+        // 自动取消静音，并默认开启“监听并输出 (Monitor and Output)”，确保电脑音箱/耳机直接听到声音
+        if (p_obs_source_set_muted) {
+            p_obs_source_set_muted(source, false);
+        }
+        if (p_obs_source_set_monitoring_type) {
+            p_obs_source_set_monitoring_type(source, OBS_MONITORING_TYPE_MONITOR_AND_OUTPUT);
+        }
+    }
     StartUdpBeaconListener();
     ScanLanForLumenNodesAsync();
     lumen_source_update(ctx, settings);
@@ -762,6 +967,8 @@ static void* lumen_source_create(obs_data_t* settings, obs_source_t* source) {
 static void lumen_source_destroy(void* data) {
     auto* ctx = static_cast<LumenSourceContext*>(data);
     if (!ctx) return;
+
+    UnregisterLumenContext(ctx);
 
     if (!ctx->phone_ip.empty()) {
         SendTallyToPhoneAsync(ctx->phone_ip, ctx->http_port, "off");
@@ -790,6 +997,10 @@ static uint32_t lumen_source_get_height(void* data) {
 static void lumen_source_video_tick(void* data, float seconds) {
     auto* ctx = static_cast<LumenSourceContext*>(data);
     if (!ctx) return;
+
+    if (!g_hooks_installed.load()) {
+        InstallLowLatencyFFmpegHook();
+    }
 
     uint32_t w = (ctx->ffmpeg_child) ? p_obs_source_get_width(ctx->ffmpeg_child) : 0;
     if (w > 0) {
@@ -1033,7 +1244,8 @@ extern "C" __declspec(dllexport) bool obs_module_load(void) {
     memset(&g_lumen_source_info, 0, sizeof(g_lumen_source_info));
     g_lumen_source_info.id = "lumen_node_source";
     g_lumen_source_info.type = OBS_SOURCE_TYPE_INPUT;
-    g_lumen_source_info.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_DO_NOT_DUPLICATE;
+    g_lumen_source_info.output_flags =
+        OBS_SOURCE_VIDEO | OBS_SOURCE_AUDIO | OBS_SOURCE_CUSTOM_DRAW | OBS_SOURCE_DO_NOT_DUPLICATE;
     g_lumen_source_info.get_name = lumen_source_get_name;
     g_lumen_source_info.create = lumen_source_create;
     g_lumen_source_info.destroy = lumen_source_destroy;

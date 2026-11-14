@@ -194,7 +194,8 @@ static void RebuildFontsForDpi() {
     HWND normalCtrls[] = {
         g_hLblDevice, g_hComboDevices, g_hLblIp, g_hEditIp,
         g_hLblSrtPort, g_hEditSrtPort, g_hLblHttpPort, g_hEditHttpPort,
-        g_hLblLatency, g_hEditLatency, g_hChkAutoFill, g_hLblStatus
+        g_hLblLatency, g_hEditLatency, g_hChkAutoFill, g_hLblStatus,
+        g_hBtnInstallObs, g_hLblObsStatus
     };
     for (HWND h : normalCtrls) {
         if (h) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontNormal), TRUE);
@@ -214,6 +215,7 @@ static void RebuildFontsForDpi() {
 }
 
 static void LayoutControls(int clientW, int clientH) {
+    (void)clientH;
     if (!g_hGrpParams) return;
 
     int margin = ScaleDpi(16);
@@ -263,16 +265,15 @@ static void LayoutControls(int clientW, int clientH) {
     MoveWindow(g_hLblHttpPort, col2LeftX, y3 + ScaleDpi(3), col2LblW, rowH, TRUE);
     MoveWindow(g_hEditHttpPort, col2EditX, y3, col2EditW, rowH, TRUE);
 
-    // Group 2: vMix Integration Actions (Short Buttons + Small Subtitles)
-    int grp2Top = grp1Top + grp1H + ScaleDpi(12);
-    int grp2H = ScaleDpi(152);
-    MoveWindow(g_hGrpActions, margin, grp2Top, groupW, ScaleDpi(20), TRUE);
+    // === Section 2: vMix Actions ===
+    int grp2Top = grp1Top + grp1H + ScaleDpi(16);
+    MoveWindow(g_hGrpActions, margin, grp2Top, groupW, ScaleDpi(22), TRUE);
 
-    int chkY = grp2Top + ScaleDpi(26);
+    int chkY = grp2Top + ScaleDpi(30);
     MoveWindow(g_hChkAutoFill, leftX, chkY, groupW - innerPad * 2, ScaleDpi(22), TRUE);
 
-    int btnY = chkY + ScaleDpi(30);
-    int btnH = ScaleDpi(34);
+    int btnY = chkY + ScaleDpi(32);
+    int btnH = ScaleDpi(36);
     int btnGap = ScaleDpi(16);
     int btnW = (groupW - innerPad * 2 - btnGap) / 2;
     int btn2X = leftX + btnW + btnGap;
@@ -280,21 +281,18 @@ static void LayoutControls(int clientW, int clientH) {
     MoveWindow(g_hBtnFillOnly, leftX, btnY, btnW, btnH, TRUE);
     MoveWindow(g_hBtnFillAndOk, btn2X, btnY, btnW, btnH, TRUE);
 
-    // Small helper captions directly beneath each button
-    int noteY = btnY + btnH + ScaleDpi(6);
-    int noteH = ScaleDpi(34);
+    int noteY = btnY + btnH + ScaleDpi(8);
+    int noteH = ScaleDpi(36);
     MoveWindow(g_hNoteFillOnly, leftX + ScaleDpi(2), noteY, btnW - ScaleDpi(4), noteH, TRUE);
     MoveWindow(g_hNoteFillAndOk, btn2X + ScaleDpi(2), noteY, btnW - ScaleDpi(4), noteH, TRUE);
 
-    // Status bar
-    int statusY = grp2Top + grp2H + ScaleDpi(10);
-    int statusH = ScaleDpi(28);
-    MoveWindow(g_hLblStatus, margin + ScaleDpi(4), statusY, groupW - ScaleDpi(8), statusH, TRUE);
+    // === Section 3: OBS Plugin ===
+    int obsTop = noteY + noteH + ScaleDpi(20);
+    MoveWindow(g_hLblStatus, margin + ScaleDpi(4), obsTop, groupW - ScaleDpi(8), ScaleDpi(24), TRUE);
 
-    // OBS button with note directly underneath
-    int obsBtnY = statusY + ScaleDpi(36);
-    MoveWindow(g_hBtnInstallObs, margin, obsBtnY, ScaleDpi(240), ScaleDpi(38), TRUE);
-    MoveWindow(g_hLblObsStatus, margin + ScaleDpi(4), obsBtnY + ScaleDpi(44), groupW - ScaleDpi(8), ScaleDpi(48), TRUE);
+    int obsBtnY = obsTop + ScaleDpi(32);
+    MoveWindow(g_hBtnInstallObs, margin, obsBtnY, ScaleDpi(260), ScaleDpi(38), TRUE);
+    MoveWindow(g_hLblObsStatus, margin + ScaleDpi(4), obsBtnY + ScaleDpi(46), groupW - ScaleDpi(8), ScaleDpi(50), TRUE);
 
     InvalidateRect(g_hMainWnd, nullptr, TRUE);
     UpdateWindow(g_hMainWnd);
@@ -336,6 +334,7 @@ static bool InstallObsPlugin(std::wstring& out_error) {
 
     std::wstring candidates[] = {
         exeDir + L"\\lumen-node-obs.dll",
+        exeDir + L"\\obs-lumen-source.dll",
         exeDir + L"\\..\\lumen-node-obs.dll",
         exeDir + L"\\..\\..\\lumen-node-obs.dll"
     };
@@ -353,21 +352,49 @@ static bool InstallObsPlugin(std::wstring& out_error) {
         return false;
     }
 
+    // 1. 安装到 OBS Studio 标准 ProgramData 插件目录: %ProgramData%\obs-studio\plugins\lumen-node-obs\bin\64bit\lumen-node-obs.dll
     wchar_t programData[MAX_PATH] = { 0 };
     SHGetFolderPathW(nullptr, CSIDL_COMMON_APPDATA, nullptr, 0, programData);
-    std::wstring destDir = std::wstring(programData) + L"\\obs-studio\\plugins\\lumen-node-obs";
-    std::wstring destDll = destDir + L"\\lumen-node-obs.dll";
+    std::wstring baseDir = std::wstring(programData) + L"\\obs-studio";
+    std::wstring pluginsDir = baseDir + L"\\plugins";
+    std::wstring modDir = pluginsDir + L"\\lumen-node-obs";
+    std::wstring binDir = modDir + L"\\bin";
+    std::wstring bitDir = binDir + L"\\64bit";
+    std::wstring destDll = bitDir + L"\\lumen-node-obs.dll";
 
-    CreateDirectoryW((std::wstring(programData) + L"\\obs-studio").c_str(), nullptr);
-    CreateDirectoryW((std::wstring(programData) + L"\\obs-studio\\plugins").c_str(), nullptr);
-    CreateDirectoryW(destDir.c_str(), nullptr);
+    CreateDirectoryW(baseDir.c_str(), nullptr);
+    CreateDirectoryW(pluginsDir.c_str(), nullptr);
+    CreateDirectoryW(modDir.c_str(), nullptr);
+    CreateDirectoryW(binDir.c_str(), nullptr);
+    CreateDirectoryW(bitDir.c_str(), nullptr);
+
+    // 清理旧版直接放在 modDir 根目录下的无效同名 DLL
+    std::wstring legacyDll = modDir + L"\\lumen-node-obs.dll";
+    if (GetFileAttributesW(legacyDll.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        SetFileAttributesW(legacyDll.c_str(), FILE_ATTRIBUTE_NORMAL);
+        DeleteFileW(legacyDll.c_str());
+    }
 
     if (GetFileAttributesW(destDll.c_str()) != INVALID_FILE_ATTRIBUTES) {
-        // Already exists, try to overwrite
         SetFileAttributesW(destDll.c_str(), FILE_ATTRIBUTE_NORMAL);
     }
 
-    if (CopyFileW(srcDll.c_str(), destDll.c_str(), FALSE)) {
+    bool copiedOk = (CopyFileW(srcDll.c_str(), destDll.c_str(), FALSE) != FALSE);
+
+    // 2. 若系统默认安装路径 C:\Program Files\obs-studio\obs-plugins\64bit 存在，同步覆盖更新，防止加载旧版本缓存
+    std::wstring progFilesObsDir = L"C:\\Program Files\\obs-studio\\obs-plugins\\64bit";
+    if (GetFileAttributesW(progFilesObsDir.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        std::wstring pfDll1 = progFilesObsDir + L"\\lumen-node-obs.dll";
+        std::wstring pfDll2 = progFilesObsDir + L"\\obs-lumen-source.dll";
+        SetFileAttributesW(pfDll1.c_str(), FILE_ATTRIBUTE_NORMAL);
+        CopyFileW(srcDll.c_str(), pfDll1.c_str(), FALSE);
+        if (GetFileAttributesW(pfDll2.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            SetFileAttributesW(pfDll2.c_str(), FILE_ATTRIBUTE_NORMAL);
+            CopyFileW(srcDll.c_str(), pfDll2.c_str(), FALSE);
+        }
+    }
+
+    if (copiedOk) {
         return true;
     }
 
@@ -942,7 +969,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         };
 
         // Section 1: Camera Discovery & Network Parameters
-        // Section titles as static labels (GroupBox text is hard to theme)
         g_hGrpParams = CreateLabel(L"Lumen Nodes");
         SendMessageW(g_hGrpParams, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontGroup), TRUE);
 
@@ -972,7 +998,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             0, 0, 10, 10, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_HTTP_PORT)), nullptr, nullptr);
 
         // Section 2: vMix Integration Actions
-        g_hGrpActions = CreateLabel(L"Actions");
+        g_hGrpActions = CreateLabel(L"vMix");
         SendMessageW(g_hGrpActions, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontGroup), TRUE);
 
         g_hChkAutoFill = CreateWindowW(
@@ -981,7 +1007,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CHK_AUTO_FILL)), nullptr, nullptr);
         SendMessageW(g_hChkAutoFill, BM_SETCHECK, BST_CHECKED, 0);
 
-        // Concise button titles + small descriptive notes below each button
         g_hBtnFillOnly = CreateWindowW(
             L"BUTTON", L"Fill Dialog",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 0, 0, 10, 10, hwnd,
@@ -997,7 +1022,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             L"BUTTON", L"Install OBS Plugin",
             WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 0, 0, 10, 10, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_INSTALL_OBS)), nullptr, nullptr);
-        g_hLblObsStatus = CreateLabel(L"OBS: Click the button above to install the Lumen Node Camera source.");
+        g_hLblObsStatus = CreateLabel(L"OBS Studio\nClick the button to install the Lumen Node Camera source.");
 
         g_hNoteFillOnly = CreateLabel(
             L"Opens vMix \"Stream / SRT\" tab and fills IP & port so you can review settings before clicking OK.");
@@ -1006,7 +1031,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         g_hLblStatus = CreateLabel(L"Listening for Lumen Node on UDP 19800...");
 
-        // Load window icon (place lumen.ico next to the EXE, or replace with resource)
         HICON hIcon = (HICON)LoadImageW(nullptr, L"lumen.ico", IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
         if (hIcon) {
             SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
@@ -1049,7 +1073,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         HDC hdc = reinterpret_cast<HDC>(wParam);
         HWND hCtrl = reinterpret_cast<HWND>(lParam);
         SetBkMode(hdc, TRANSPARENT);
-        // Force high contrast for all static text
         if (hCtrl == g_hLblStatus || hCtrl == g_hLblObsStatus) {
             SetTextColor(hdc, RGB(120, 230, 210));
         }
@@ -1176,7 +1199,7 @@ int main() {
     RegisterClassExW(&wc);
 
     int initW = ScaleDpi(580);
-    int initH = ScaleDpi(580);
+    int initH = ScaleDpi(640);
 
     g_hMainWnd = CreateWindowExW(
         WS_EX_TOPMOST, L"LumenVmixBridgeGuiClass",
