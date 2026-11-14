@@ -104,6 +104,15 @@ static HFONT g_hFontGroup = nullptr;
 static HFONT g_hFontSmall = nullptr;
 static HBRUSH g_hBrushBg = nullptr;
 
+// 新增 UI 卡片分组标题句柄、画刷与卡片矩形区域（配合下方函数使用）
+static HWND g_hGrpObs = nullptr;
+static HBRUSH g_hBrushCard = nullptr;
+static HBRUSH g_hBrushEdit = nullptr;
+static RECT g_rcCardNodes{};
+static RECT g_rcCardVmix{};
+static RECT g_rcCardObs{};
+static RECT g_rcCardStatus{};
+
 static void EnableDarkTitleBar(HWND hwnd) {
     if (!hwnd) return;
     BOOL dark = TRUE;
@@ -175,7 +184,6 @@ static UINT QueryWindowDpi(HWND hwnd) {
     }
     return (dpi > 0) ? dpi : 96;
 }
-
 static void RebuildFontsForDpi() {
     if (g_hFontNormal) DeleteObject(g_hFontNormal);
     if (g_hFontGroup) DeleteObject(g_hFontGroup);
@@ -184,7 +192,7 @@ static void RebuildFontsForDpi() {
     g_hFontNormal = CreateFontW(-ScaleDpi(13), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-    g_hFontGroup = CreateFontW(-ScaleDpi(14), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+    g_hFontGroup = CreateFontW(-ScaleDpi(13), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
     g_hFontSmall = CreateFontW(-ScaleDpi(11), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
@@ -195,104 +203,128 @@ static void RebuildFontsForDpi() {
         g_hLblDevice, g_hComboDevices, g_hLblIp, g_hEditIp,
         g_hLblSrtPort, g_hEditSrtPort, g_hLblHttpPort, g_hEditHttpPort,
         g_hLblLatency, g_hEditLatency, g_hChkAutoFill, g_hLblStatus,
-        g_hBtnInstallObs, g_hLblObsStatus
+        g_hLblObsStatus
     };
     for (HWND h : normalCtrls) {
         if (h) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontNormal), TRUE);
     }
 
-    HWND boldCtrls[] = { g_hBtnFillOnly, g_hBtnFillAndOk };
+    HWND boldCtrls[] = {
+        g_hGrpParams, g_hGrpActions, g_hGrpObs,
+        g_hBtnFillOnly, g_hBtnFillAndOk, g_hBtnInstallObs
+    };
     for (HWND h : boldCtrls) {
-        if (h) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontNormal), TRUE);
+        if (h) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontGroup), TRUE);
     }
-    if (g_hGrpParams) SendMessageW(g_hGrpParams, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontGroup), TRUE);
-    if (g_hGrpActions) SendMessageW(g_hGrpActions, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontGroup), TRUE);
 
     HWND smallCtrls[] = { g_hNoteFillOnly, g_hNoteFillAndOk };
     for (HWND h : smallCtrls) {
         if (h) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontSmall), TRUE);
     }
 }
-
 static void LayoutControls(int clientW, int clientH) {
     (void)clientH;
     if (!g_hGrpParams) return;
 
     int margin = ScaleDpi(16);
-    int innerPad = ScaleDpi(16);
-    int groupW = std::max(ScaleDpi(360), clientW - margin * 2);
-
-    // Group 1: Camera Discovery & Network Parameters (2-column compact grid for ports)
-    int grp1Top = ScaleDpi(12);
-    int grp1H = ScaleDpi(168);
-    // Titles as labels
-    MoveWindow(g_hGrpParams, margin, grp1Top, groupW, ScaleDpi(20), TRUE);
-
-    int labelW = ScaleDpi(165);
+    int innerPad = ScaleDpi(18);
+    int cardW = std::max(ScaleDpi(420), clientW - margin * 2);
     int leftX = margin + innerPad;
-    int inputX = leftX + labelW + ScaleDpi(8);
-    int inputW = std::max(ScaleDpi(140), (margin + groupW - innerPad) - inputX);
+    int rightEdge = margin + cardW - innerPad;
+    int contentW = rightEdge - leftX;
     int rowH = ScaleDpi(24);
 
-    int y1 = grp1Top + ScaleDpi(28);
-    MoveWindow(g_hLblDevice, leftX, y1 + ScaleDpi(3), labelW, rowH, TRUE);
-    MoveWindow(g_hComboDevices, inputX, y1, inputW, ScaleDpi(200), TRUE);
+    // =========================================================================
+    // 卡片 1: Lumen Nodes (设备发现与网络参数框)
+    // =========================================================================
+    int card1Top = ScaleDpi(14);
+    int card1H = ScaleDpi(168);
+    g_rcCardNodes = { margin, card1Top, margin + cardW, card1Top + card1H };
 
-    // Row 2: Target IP Address + Latency (two columns)
-    int y2 = y1 + ScaleDpi(36);
-    int colGap = ScaleDpi(16);
-    int halfW = (groupW - innerPad * 2 - colGap) / 2;
+    MoveWindow(g_hGrpParams, leftX + ScaleDpi(8), card1Top + ScaleDpi(12), contentW - ScaleDpi(8), ScaleDpi(20), TRUE);
+
+    int y1 = card1Top + ScaleDpi(46);
+    int labelW = ScaleDpi(135);
+    int comboX = leftX + labelW + ScaleDpi(8);
+    MoveWindow(g_hLblDevice, leftX, y1 + ScaleDpi(3), labelW, rowH, TRUE);
+    MoveWindow(g_hComboDevices, comboX, y1, rightEdge - comboX, ScaleDpi(200), TRUE);
+
+    int colGap = ScaleDpi(20);
+    int halfW = (contentW - colGap) / 2;
     int col1LblW = ScaleDpi(115);
     int col1EditX = leftX + col1LblW;
-    int col1EditW = std::max(ScaleDpi(80), halfW - col1LblW);
+    int col1EditW = std::max(ScaleDpi(90), halfW - col1LblW);
 
     int col2LeftX = leftX + halfW + colGap;
     int col2LblW = ScaleDpi(115);
     int col2EditX = col2LeftX + col2LblW;
-    int col2EditW = std::max(ScaleDpi(60), (margin + groupW - innerPad) - col2EditX);
+    int col2EditW = std::max(ScaleDpi(70), rightEdge - col2EditX);
 
+    int y2 = y1 + ScaleDpi(38);
     MoveWindow(g_hLblIp, leftX, y2 + ScaleDpi(3), col1LblW, rowH, TRUE);
     MoveWindow(g_hEditIp, col1EditX, y2, col1EditW, rowH, TRUE);
-
     MoveWindow(g_hLblLatency, col2LeftX, y2 + ScaleDpi(3), col2LblW, rowH, TRUE);
     MoveWindow(g_hEditLatency, col2EditX, y2, col2EditW, rowH, TRUE);
 
-    // Row 3: SRT Port + Tally HTTP Port (two columns)
     int y3 = y2 + ScaleDpi(36);
     MoveWindow(g_hLblSrtPort, leftX, y3 + ScaleDpi(3), col1LblW, rowH, TRUE);
     MoveWindow(g_hEditSrtPort, col1EditX, y3, col1EditW, rowH, TRUE);
-
     MoveWindow(g_hLblHttpPort, col2LeftX, y3 + ScaleDpi(3), col2LblW, rowH, TRUE);
     MoveWindow(g_hEditHttpPort, col2EditX, y3, col2EditW, rowH, TRUE);
 
-    // === Section 2: vMix Actions ===
-    int grp2Top = grp1Top + grp1H + ScaleDpi(16);
-    MoveWindow(g_hGrpActions, margin, grp2Top, groupW, ScaleDpi(22), TRUE);
+    // =========================================================================
+    // 卡片 2: vMix (vMix 专用导入与自动填充框)
+    // =========================================================================
+    int card2Top = g_rcCardNodes.bottom + ScaleDpi(14);
+    int card2H = ScaleDpi(190);
+    g_rcCardVmix = { margin, card2Top, margin + cardW, card2Top + card2H };
 
-    int chkY = grp2Top + ScaleDpi(30);
-    MoveWindow(g_hChkAutoFill, leftX, chkY, groupW - innerPad * 2, ScaleDpi(22), TRUE);
+    MoveWindow(g_hGrpActions, leftX + ScaleDpi(8), card2Top + ScaleDpi(12), contentW - ScaleDpi(8), ScaleDpi(20), TRUE);
+
+    int chkY = card2Top + ScaleDpi(44);
+    MoveWindow(g_hChkAutoFill, leftX, chkY, contentW, ScaleDpi(24), TRUE);
 
     int btnY = chkY + ScaleDpi(32);
-    int btnH = ScaleDpi(36);
+    int btnH = ScaleDpi(38);
     int btnGap = ScaleDpi(16);
-    int btnW = (groupW - innerPad * 2 - btnGap) / 2;
+    int btnW = (contentW - btnGap) / 2;
     int btn2X = leftX + btnW + btnGap;
 
     MoveWindow(g_hBtnFillOnly, leftX, btnY, btnW, btnH, TRUE);
     MoveWindow(g_hBtnFillAndOk, btn2X, btnY, btnW, btnH, TRUE);
 
     int noteY = btnY + btnH + ScaleDpi(8);
-    int noteH = ScaleDpi(36);
+    int noteH = ScaleDpi(46);
     MoveWindow(g_hNoteFillOnly, leftX + ScaleDpi(2), noteY, btnW - ScaleDpi(4), noteH, TRUE);
     MoveWindow(g_hNoteFillAndOk, btn2X + ScaleDpi(2), noteY, btnW - ScaleDpi(4), noteH, TRUE);
 
-    // === Section 3: OBS Plugin ===
-    int obsTop = noteY + noteH + ScaleDpi(20);
-    MoveWindow(g_hLblStatus, margin + ScaleDpi(4), obsTop, groupW - ScaleDpi(8), ScaleDpi(24), TRUE);
+    // =========================================================================
+    // 卡片 3: OBS Studio (OBS 专用插件一键安装框)
+    // =========================================================================
+    int card3Top = g_rcCardVmix.bottom + ScaleDpi(14);
+    int card3H = ScaleDpi(112);
+    g_rcCardObs = { margin, card3Top, margin + cardW, card3Top + card3H };
 
-    int obsBtnY = obsTop + ScaleDpi(32);
-    MoveWindow(g_hBtnInstallObs, margin, obsBtnY, ScaleDpi(260), ScaleDpi(38), TRUE);
-    MoveWindow(g_hLblObsStatus, margin + ScaleDpi(4), obsBtnY + ScaleDpi(46), groupW - ScaleDpi(8), ScaleDpi(50), TRUE);
+    if (g_hGrpObs) {
+        MoveWindow(g_hGrpObs, leftX + ScaleDpi(8), card3Top + ScaleDpi(12), contentW - ScaleDpi(8), ScaleDpi(20), TRUE);
+    }
+
+    int obsBodyY = card3Top + ScaleDpi(46);
+    int obsBtnW = ScaleDpi(190);
+    int obsBtnH = ScaleDpi(40);
+    MoveWindow(g_hBtnInstallObs, leftX, obsBodyY, obsBtnW, obsBtnH, TRUE);
+
+    int obsDescX = leftX + obsBtnW + ScaleDpi(16);
+    MoveWindow(g_hLblObsStatus, obsDescX, obsBodyY + ScaleDpi(2), rightEdge - obsDescX, ScaleDpi(46), TRUE);
+
+    // =========================================================================
+    // 底部状态栏框: Status Bar
+    // =========================================================================
+    int card4Top = g_rcCardObs.bottom + ScaleDpi(14);
+    int card4H = ScaleDpi(40);
+    g_rcCardStatus = { margin, card4Top, margin + cardW, card4Top + card4H };
+
+    MoveWindow(g_hLblStatus, leftX + ScaleDpi(12), card4Top + ScaleDpi(10), contentW - ScaleDpi(16), ScaleDpi(22), TRUE);
 
     InvalidateRect(g_hMainWnd, nullptr, TRUE);
     UpdateWindow(g_hMainWnd);
@@ -956,21 +988,57 @@ static void RefreshDeviceComboAndFields() {
         SetWindowTextW(g_hLblStatus, status.c_str());
     }
 }
+static void DrawStudioCard(HDC hdc, const RECT& rc, COLORREF accentColor, bool hasHeaderDivider) {
+    HBRUSH hCardBr = CreateSolidBrush(RGB(28, 31, 38));
+    HPEN hBorderPen = CreatePen(PS_SOLID, 1, RGB(54, 61, 76));
+    HGDIOBJ oldBr = SelectObject(hdc, hCardBr);
+    HGDIOBJ oldPen = SelectObject(hdc, hBorderPen);
+
+    int radius = ScaleDpi(10);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
+
+    SelectObject(hdc, oldBr);
+    SelectObject(hdc, oldPen);
+    DeleteObject(hCardBr);
+    DeleteObject(hBorderPen);
+
+    // 绘制标题左侧高亮色条
+    RECT rcAccent = {
+        rc.left + ScaleDpi(14),
+        rc.top + ScaleDpi(13),
+        rc.left + ScaleDpi(18),
+        rc.top + ScaleDpi(29)
+    };
+    HBRUSH hAccBr = CreateSolidBrush(accentColor);
+    FillRect(hdc, &rcAccent, hAccBr);
+    DeleteObject(hAccBr);
+
+    // 绘制卡片标题分割线
+    if (hasHeaderDivider) {
+        HPEN hLinePen = CreatePen(PS_SOLID, 1, RGB(44, 50, 62));
+        HGDIOBJ oldLinePen = SelectObject(hdc, hLinePen);
+        MoveToEx(hdc, rc.left + ScaleDpi(14), rc.top + ScaleDpi(36), nullptr);
+        LineTo(hdc, rc.right - ScaleDpi(14), rc.top + ScaleDpi(36));
+        SelectObject(hdc, oldLinePen);
+        DeleteObject(hLinePen);
+    }
+}
 
 static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         g_currentDpi = QueryWindowDpi(hwnd);
-        g_hBrushBg = CreateSolidBrush(RGB(32, 32, 34));
+        g_hBrushBg = CreateSolidBrush(RGB(18, 20, 24));
+        g_hBrushCard = CreateSolidBrush(RGB(28, 31, 38));
+        g_hBrushEdit = CreateSolidBrush(RGB(20, 22, 28));
 
         auto CreateLabel = [&](const wchar_t* text) -> HWND {
             return CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_NOPREFIX,
                 0, 0, 10, 10, hwnd, nullptr, nullptr, nullptr);
         };
 
-        // Section 1: Camera Discovery & Network Parameters
-        g_hGrpParams = CreateLabel(L"Lumen Nodes");
-        SendMessageW(g_hGrpParams, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontGroup), TRUE);
+        // 卡片 1: Lumen Nodes
+        g_hGrpParams = CreateLabel(L"Lumen Nodes  —  Camera Discovery & Network");
 
         g_hLblDevice = CreateLabel(L"Discovered Camera:");
         g_hComboDevices = CreateWindowW(
@@ -979,56 +1047,58 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         g_hLblIp = CreateLabel(L"Target IP Address:");
         g_hEditIp = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | WS_TABSTOP,
+            0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_AUTOHSCROLL | WS_TABSTOP,
             0, 0, 10, 10, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_IP)), nullptr, nullptr);
 
         g_hLblLatency = CreateLabel(L"SRT Latency (ms):");
         g_hEditLatency = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"25", WS_CHILD | WS_VISIBLE | ES_NUMBER | WS_TABSTOP,
+            0, L"EDIT", L"80", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | WS_TABSTOP,
             0, 0, 10, 10, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_LATENCY)), nullptr, nullptr);
 
         g_hLblSrtPort = CreateLabel(L"SRT Stream Port:");
         g_hEditSrtPort = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"10000", WS_CHILD | WS_VISIBLE | ES_NUMBER | WS_TABSTOP,
+            0, L"EDIT", L"10000", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | WS_TABSTOP,
             0, 0, 10, 10, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_SRT_PORT)), nullptr, nullptr);
 
         g_hLblHttpPort = CreateLabel(L"Tally HTTP Port:");
         g_hEditHttpPort = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"EDIT", L"8080", WS_CHILD | WS_VISIBLE | ES_NUMBER | WS_TABSTOP,
+            0, L"EDIT", L"8080", WS_CHILD | WS_VISIBLE | WS_BORDER | ES_NUMBER | WS_TABSTOP,
             0, 0, 10, 10, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_EDIT_HTTP_PORT)), nullptr, nullptr);
 
-        // Section 2: vMix Integration Actions
-        g_hGrpActions = CreateLabel(L"vMix");
-        SendMessageW(g_hGrpActions, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontGroup), TRUE);
+        // 卡片 2: vMix Integration (采用 BS_OWNERDRAW 自绘复选框与按钮，彻底解决黑字看不清问题)
+        g_hGrpActions = CreateLabel(L"vMix  —  SRT Caller Auto-Mount & Tally Sync");
 
         g_hChkAutoFill = CreateWindowW(
             L"BUTTON", L"Auto-fill when Stream / SRT tab is opened",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP, 0, 0, 10, 10, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP, 0, 0, 10, 10, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_CHK_AUTO_FILL)), nullptr, nullptr);
-        SendMessageW(g_hChkAutoFill, BM_SETCHECK, BST_CHECKED, 0);
 
         g_hBtnFillOnly = CreateWindowW(
             L"BUTTON", L"Fill Dialog",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 0, 0, 10, 10, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP, 0, 0, 10, 10, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_FILL_ONLY)), nullptr, nullptr);
 
         g_hBtnFillAndOk = CreateWindowW(
             L"BUTTON", L"Add to vMix",
-            WS_CHILD | WS_VISIBLE | BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 0, 10, 10, hwnd,
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP, 0, 0, 10, 10, hwnd,
             reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_FILL_AND_OK)), nullptr, nullptr);
-
-        // OBS section
-        g_hBtnInstallObs = CreateWindowW(
-            L"BUTTON", L"Install OBS Plugin",
-            WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON | WS_TABSTOP, 0, 0, 10, 10, hwnd,
-            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_INSTALL_OBS)), nullptr, nullptr);
-        g_hLblObsStatus = CreateLabel(L"OBS Studio\nClick the button to install the Lumen Node Camera source.");
 
         g_hNoteFillOnly = CreateLabel(
             L"Opens vMix \"Stream / SRT\" tab and fills IP & port so you can review settings before clicking OK.");
         g_hNoteFillAndOk = CreateLabel(
             L"Fills IP & port and automatically clicks OK in vMix to mount the camera immediately.");
 
+        // 卡片 3: OBS Studio Integration
+        g_hGrpObs = CreateLabel(L"OBS Studio  —  Native Low-Latency Source Plugin");
+
+        g_hBtnInstallObs = CreateWindowW(
+            L"BUTTON", L"Install OBS Plugin",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP, 0, 0, 10, 10, hwnd,
+            reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_BTN_INSTALL_OBS)), nullptr, nullptr);
+        g_hLblObsStatus = CreateLabel(
+            L"Installs 'Lumen Node Camera' source plugin into OBS Studio.\nRestart OBS after installing to auto-discover cameras.");
+
+        // 底部状态栏
         g_hLblStatus = CreateLabel(L"Listening for Lumen Node on UDP 19800...");
 
         HICON hIcon = (HICON)LoadImageW(nullptr, L"lumen.ico", IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE);
@@ -1052,8 +1122,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-        mmi->ptMinTrackSize.x = ScaleDpi(540);
-        mmi->ptMinTrackSize.y = ScaleDpi(415);
+        mmi->ptMinTrackSize.x = ScaleDpi(580);
+        mmi->ptMinTrackSize.y = ScaleDpi(600);
         return 0;
     }
 
@@ -1069,27 +1139,153 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         return 0;
     }
 
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hwnd, &ps);
+
+        // 绘制 3 个功能分区卡片框 + 1 个底部状态栏框
+        DrawStudioCard(hdc, g_rcCardNodes, RGB(56, 189, 248), true);   // 青色色标：Lumen Nodes
+        DrawStudioCard(hdc, g_rcCardVmix, RGB(59, 130, 246), true);    // 蓝色色标：vMix
+        DrawStudioCard(hdc, g_rcCardObs, RGB(16, 185, 129), true);     // 翠绿色标：OBS Studio
+        DrawStudioCard(hdc, g_rcCardStatus, RGB(45, 212, 191), false); // 状态栏框
+
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
+
+    case WM_DRAWITEM: {
+        auto* dis = reinterpret_cast<LPDRAWITEMSTRUCT>(lParam);
+        if (!dis) return FALSE;
+
+        HDC hdc = dis->hDC;
+        RECT rc = dis->rcItem;
+        SetBkMode(hdc, TRANSPARENT);
+
+        // 1. 自绘高对比度复选框 (彻底消除 Windows 主题导致的黑字看不清问题)
+        if (dis->CtlID == IDC_CHK_AUTO_FILL) {
+            FillRect(hdc, &rc, g_hBrushCard);
+
+            int boxSize = ScaleDpi(18);
+            int boxTop = rc.top + ((rc.bottom - rc.top) - boxSize) / 2;
+            RECT rcBox = { rc.left, boxTop, rc.left + boxSize, boxTop + boxSize };
+
+            bool checked = g_auto_watch_vmix_dialog.load();
+            COLORREF boxFill = checked ? RGB(37, 99, 235) : RGB(20, 22, 28);
+            COLORREF boxBorder = checked ? RGB(96, 165, 250) : RGB(100, 116, 139);
+
+            HBRUSH hBoxBr = CreateSolidBrush(boxFill);
+            HPEN hBoxPen = CreatePen(PS_SOLID, 1, boxBorder);
+            HGDIOBJ oldBr = SelectObject(hdc, hBoxBr);
+            HGDIOBJ oldPen = SelectObject(hdc, hBoxPen);
+            RoundRect(hdc, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, ScaleDpi(4), ScaleDpi(4));
+            SelectObject(hdc, oldBr);
+            SelectObject(hdc, oldPen);
+            DeleteObject(hBoxBr);
+            DeleteObject(hBoxPen);
+
+            if (checked) {
+                HPEN hCheckPen = CreatePen(PS_SOLID, std::max(2, ScaleDpi(2)), RGB(255, 255, 255));
+                HGDIOBJ oldCkPen = SelectObject(hdc, hCheckPen);
+                MoveToEx(hdc, rcBox.left + ScaleDpi(4), rcBox.top + ScaleDpi(9), nullptr);
+                LineTo(hdc, rcBox.left + ScaleDpi(8), rcBox.bottom - ScaleDpi(4));
+                LineTo(hdc, rcBox.right - ScaleDpi(3), rcBox.top + ScaleDpi(4));
+                SelectObject(hdc, oldCkPen);
+                DeleteObject(hCheckPen);
+            }
+
+            wchar_t text[128] = { 0 };
+            GetWindowTextW(dis->hwndItem, text, 127);
+            HGDIOBJ oldFont = SelectObject(hdc, g_hFontNormal);
+            SetTextColor(hdc, RGB(240, 244, 250)); // 亮白色文字，清晰醒目
+            RECT rcText = { rcBox.right + ScaleDpi(10), rc.top, rc.right, rc.bottom };
+            DrawTextW(hdc, text, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(hdc, oldFont);
+            return TRUE;
+        }
+
+        // 2. 自绘现代化圆角工作室按钮 (Fill Dialog / Add to vMix / Install OBS Plugin)
+        if (dis->CtlID == IDC_BTN_FILL_ONLY ||
+            dis->CtlID == IDC_BTN_FILL_AND_OK ||
+            dis->CtlID == IDC_BTN_INSTALL_OBS) {
+            FillRect(hdc, &rc, g_hBrushCard);
+
+            bool pressed = (dis->itemState & ODS_SELECTED) != 0;
+            COLORREF bgColor = RGB(45, 52, 66);
+            COLORREF borderColor = RGB(82, 94, 116);
+
+            if (dis->CtlID == IDC_BTN_FILL_AND_OK) {
+                bgColor = pressed ? RGB(29, 78, 216) : RGB(37, 99, 235);       // vMix 主按钮：亮蓝色
+                borderColor = RGB(96, 165, 250);
+            }
+            else if (dis->CtlID == IDC_BTN_INSTALL_OBS) {
+                bgColor = pressed ? RGB(5, 150, 105) : RGB(16, 185, 129);      // OBS 按钮：翠绿色
+                borderColor = RGB(52, 211, 153);
+            }
+            else {
+                bgColor = pressed ? RGB(36, 42, 54) : RGB(48, 56, 72);         // 次级按钮：深灰蓝
+                borderColor = RGB(90, 102, 124);
+            }
+
+            HBRUSH hBtnBr = CreateSolidBrush(bgColor);
+            HPEN hBtnPen = CreatePen(PS_SOLID, 1, borderColor);
+            HGDIOBJ oldBr = SelectObject(hdc, hBtnBr);
+            HGDIOBJ oldPen = SelectObject(hdc, hBtnPen);
+            RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, ScaleDpi(8), ScaleDpi(8));
+            SelectObject(hdc, oldBr);
+            SelectObject(hdc, oldPen);
+            DeleteObject(hBtnBr);
+            DeleteObject(hBtnPen);
+
+            wchar_t btnText[128] = { 0 };
+            GetWindowTextW(dis->hwndItem, btnText, 127);
+            HGDIOBJ oldFont = SelectObject(hdc, g_hFontGroup);
+            SetTextColor(hdc, RGB(255, 255, 255));
+            RECT rcText = rc;
+            if (pressed) OffsetRect(&rcText, 0, 1);
+            DrawTextW(hdc, btnText, -1, &rcText, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            SelectObject(hdc, oldFont);
+            return TRUE;
+        }
+        return FALSE;
+    }
+
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX: {
+        HDC hdc = reinterpret_cast<HDC>(wParam);
+        SetTextColor(hdc, RGB(242, 246, 252));
+        SetBkColor(hdc, RGB(20, 22, 28));
+        return reinterpret_cast<LRESULT>(g_hBrushEdit);
+    }
+
     case WM_CTLCOLORSTATIC: {
         HDC hdc = reinterpret_cast<HDC>(wParam);
         HWND hCtrl = reinterpret_cast<HWND>(lParam);
         SetBkMode(hdc, TRANSPARENT);
-        if (hCtrl == g_hLblStatus || hCtrl == g_hLblObsStatus) {
-            SetTextColor(hdc, RGB(120, 230, 210));
+        SetBkColor(hdc, RGB(28, 31, 38));
+
+        if (hCtrl == g_hGrpParams || hCtrl == g_hGrpActions || hCtrl == g_hGrpObs) {
+            SetTextColor(hdc, RGB(255, 255, 255));
+        }
+        else if (hCtrl == g_hLblStatus) {
+            SetTextColor(hdc, RGB(94, 234, 212));
+        }
+        else if (hCtrl == g_hLblObsStatus) {
+            SetTextColor(hdc, RGB(203, 213, 225));
         }
         else if (hCtrl == g_hNoteFillOnly || hCtrl == g_hNoteFillAndOk) {
-            SetTextColor(hdc, RGB(200, 210, 220));
+            SetTextColor(hdc, RGB(165, 178, 198));
         }
         else {
-            SetTextColor(hdc, RGB(245, 245, 245));
+            SetTextColor(hdc, RGB(230, 236, 245));
         }
-        return reinterpret_cast<LRESULT>(g_hBrushBg);
+        return reinterpret_cast<LRESULT>(g_hBrushCard);
     }
 
     case WM_CTLCOLORBTN: {
         HDC hdc = reinterpret_cast<HDC>(wParam);
         SetTextColor(hdc, RGB(255, 255, 255));
         SetBkMode(hdc, TRANSPARENT);
-        return reinterpret_cast<LRESULT>(g_hBrushBg);
+        return reinterpret_cast<LRESULT>(g_hBrushCard);
     }
 
     case WM_NODE_DISCOVERED: {
@@ -1131,9 +1327,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             g_lastAutoFilledDialog = nullptr;
             PostMessageW(hwnd, WM_NODE_DISCOVERED, 0, 0);
         }
-        else if (id == IDC_CHK_AUTO_FILL) {
-            LRESULT chk = SendMessageW(g_hChkAutoFill, BM_GETCHECK, 0, 0);
-            g_auto_watch_vmix_dialog.store(chk == BST_CHECKED);
+        else if (id == IDC_CHK_AUTO_FILL && code == BN_CLICKED) {
+            bool nextState = !g_auto_watch_vmix_dialog.load();
+            g_auto_watch_vmix_dialog.store(nextState);
+            InvalidateRect(g_hChkAutoFill, nullptr, FALSE);
         }
         else if (id == IDC_BTN_FILL_ONLY) {
             g_lastAutoFilledDialog = nullptr;
@@ -1150,8 +1347,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         else if (id == IDC_BTN_INSTALL_OBS) {
             std::wstring err;
             if (InstallObsPlugin(err)) {
-                SetWindowTextW(g_hLblObsStatus, L"OBS: Plugin installed successfully.\nPlease restart OBS Studio, then add the 'Lumen Node Camera' source.");
+                SetWindowTextW(g_hLblObsStatus, L"Plugin installed successfully!\nPlease restart OBS Studio and add 'Lumen Node Camera'.");
                 SetWindowTextW(g_hBtnInstallObs, L"OBS Plugin Installed");
+                InvalidateRect(g_hBtnInstallObs, nullptr, FALSE);
                 MessageBoxW(hwnd, L"OBS plugin installed successfully.\n\nPlease completely close and restart OBS Studio, then add the 'Lumen Node Camera' source.", L"Lumen Node Helper", MB_OK | MB_ICONINFORMATION);
             }
             else {
@@ -1168,6 +1366,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_hFontGroup) DeleteObject(g_hFontGroup);
         if (g_hFontSmall) DeleteObject(g_hFontSmall);
         if (g_hBrushBg) DeleteObject(g_hBrushBg);
+        if (g_hBrushCard) DeleteObject(g_hBrushCard);
+        if (g_hBrushEdit) DeleteObject(g_hBrushEdit);
         PostQuitMessage(0);
         return 0;
     }
@@ -1194,12 +1394,12 @@ int main() {
     wc.lpfnWndProc = WndProc;
     wc.hInstance = GetModuleHandleW(nullptr);
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = CreateSolidBrush(RGB(32, 32, 34));
+    wc.hbrBackground = CreateSolidBrush(RGB(18, 20, 24));
     wc.lpszClassName = L"LumenVmixBridgeGuiClass";
     RegisterClassExW(&wc);
 
-    int initW = ScaleDpi(580);
-    int initH = ScaleDpi(640);
+    int initW = ScaleDpi(620);
+    int initH = ScaleDpi(615);
 
     g_hMainWnd = CreateWindowExW(
         WS_EX_TOPMOST, L"LumenVmixBridgeGuiClass",
