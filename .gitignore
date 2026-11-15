@@ -1,5 +1,6 @@
-x64/
-x86/
-Debug/
-Release/
+[200~**/x64/
+**/x86/
+**/Debug/
+**/Release/
 .vs/
+
