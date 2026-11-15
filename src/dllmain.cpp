@@ -211,6 +211,8 @@ struct LumenSourceContext {
     bool is_active = false;
     bool is_showing = false;
     float scan_retry_timer = 0.0f;
+    float tally_heartbeat_timer = 0.0f;
+    bool was_stream_ready = false;
     uint64_t next_obs_audio_ts_ns = 0;
     bool logged_first_audio = false;
 };
@@ -1007,8 +1009,20 @@ static void lumen_source_video_tick(void* data, float seconds) {
     uint32_t w = (ctx->ffmpeg_child) ? p_obs_source_get_width(ctx->ffmpeg_child) : 0;
     if (w > 0) {
         ctx->scan_retry_timer = 0.0f;
+        ctx->tally_heartbeat_timer += seconds;
+        // 当视频流刚建立连接（或手机 App 重启重连）以及每 2.5 秒心跳时，主动向手机同步当前 Tally 状态
+        if (!ctx->was_stream_ready || ctx->tally_heartbeat_timer >= 2.5f) {
+            ctx->was_stream_ready = true;
+            ctx->tally_heartbeat_timer = 0.0f;
+            if (!ctx->phone_ip.empty()) {
+                SendTallyToPhoneAsync(ctx->phone_ip, ctx->http_port,
+                    ctx->is_active ? "program" : (ctx->is_showing ? "preview" : "off"));
+            }
+        }
         return;
     }
+
+    ctx->was_stream_ready = false;
 
     if (ctx->selected_dev == "auto") {
         DiscoveredNodeInfo first_node;

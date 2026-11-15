@@ -565,10 +565,24 @@ static bool SelectSrtCallerInCombo(HWND hCombo) {
     }
     return true;
 }
+static void BringVmixWindowToFront(HWND hwndTarget) {
+    if (!hwndTarget) return;
+    // 临时取消 Lumen Node Helper 的 TOPMOST 置顶遮挡，确保 vMix 对话框左侧边栏完全露出
+    if (g_hMainWnd) {
+        SetWindowPos(g_hMainWnd, HWND_NOTOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    if (IsIconic(hwndTarget)) {
+        ShowWindow(hwndTarget, SW_RESTORE);
+    }
+    SetWindowPos(hwndTarget, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+    SetForegroundWindow(hwndTarget);
+    BringWindowToTop(hwndTarget);
+    Sleep(80);
+}
 
 static void ClickStreamSrtTabInDialog(IUIAutomation* uia, HWND hInputSelect) {
-    SetForegroundWindow(hInputSelect);
-    Sleep(60);
+    BringVmixWindowToFront(hInputSelect);
 
     bool clicked_via_uia = false;
     IUIAutomationElement* dlgRoot = nullptr;
@@ -586,9 +600,20 @@ static void ClickStreamSrtTabInDialog(IUIAutomation* uia, HWND hInputSelect) {
 
                 BSTR name = nullptr;
                 el->get_CurrentName(&name);
-                if (name && (wcsstr(name, L"Stream / SRT") != nullptr || wcsstr(name, L"Stream/SRT") != nullptr)) {
+                if (name && (wcsstr(name, L"Stream / SRT") != nullptr ||
+                    wcsstr(name, L"Stream/SRT") != nullptr ||
+                    wcsstr(name, L"流 / SRT") != nullptr)) {
+                    // 优先尝试 UIA LegacyIAccessible 默认动作，不受任何屏幕坐标遮挡影响
+                    IUIAutomationLegacyIAccessiblePattern* legacyPat = nullptr;
+                    if (SUCCEEDED(el->GetCurrentPatternAs(UIA_LegacyIAccessiblePatternId,
+                        IID_PPV_ARGS(&legacyPat))) && legacyPat) {
+                        legacyPat->DoDefaultAction();
+                        legacyPat->Release();
+                    }
+
                     RECT rc{};
                     if (SUCCEEDED(el->get_CurrentBoundingRectangle(&rc)) && (rc.right - rc.left) > 10) {
+                        BringVmixWindowToFront(hInputSelect);
                         ClickScreenRectCenter(rc);
                         clicked_via_uia = true;
                     }
@@ -606,9 +631,15 @@ static void ClickStreamSrtTabInDialog(IUIAutomation* uia, HWND hInputSelect) {
     }
 
     if (!clicked_via_uia) {
+        BringVmixWindowToFront(hInputSelect);
         RECT dlgRc{};
         GetWindowRect(hInputSelect, &dlgRc);
-        ClickScreenPoint(dlgRc.left + 85, dlgRc.top + 288);
+        int dlgW = dlgRc.right - dlgRc.left;
+        int dlgH = dlgRc.bottom - dlgRc.top;
+        // 按 Input Select 窗口宽高比例定位左侧边栏 Stream / SRT 项，适配任意 DPI 缩放
+        int clickX = dlgRc.left + std::max(60, dlgW * 8 / 100);
+        int clickY = dlgRc.top + std::max(200, dlgH * 43 / 100);
+        ClickScreenPoint(clickX, clickY);
     }
 }
 
@@ -643,8 +674,7 @@ static bool AutoFillVmixInputSelectWindow(bool force_open_and_switch_tab, bool a
             return false;
         }
 
-        SetForegroundWindow(wndCtx.hMainVmix);
-        Sleep(80);
+        BringVmixWindowToFront(wndCtx.hMainVmix);
 
         bool clicked_add_input = false;
         IUIAutomationElement* rootMain = nullptr;
@@ -664,6 +694,7 @@ static bool AutoFillVmixInputSelectWindow(bool force_open_and_switch_tab, bool a
                     if (name && (wcscmp(name, L"Add Input") == 0 || wcscmp(name, L"添加输入") == 0)) {
                         RECT rc{};
                         if (SUCCEEDED(item->get_CurrentBoundingRectangle(&rc)) && rc.right > rc.left) {
+                            BringVmixWindowToFront(wndCtx.hMainVmix);
                             ClickScreenRectCenter(rc);
                             clicked_add_input = true;
                         }
@@ -681,9 +712,10 @@ static bool AutoFillVmixInputSelectWindow(bool force_open_and_switch_tab, bool a
         }
 
         if (!clicked_add_input) {
+            BringVmixWindowToFront(wndCtx.hMainVmix);
             RECT mainRc{};
             GetWindowRect(wndCtx.hMainVmix, &mainRc);
-            ClickScreenPoint(mainRc.left + 30, mainRc.bottom - 35);
+            ClickScreenPoint(mainRc.left + ScaleDpi(35), mainRc.bottom - ScaleDpi(35));
         }
 
         for (int wait_i = 0; wait_i < 15; ++wait_i) {
@@ -701,6 +733,10 @@ static bool AutoFillVmixInputSelectWindow(bool force_open_and_switch_tab, bool a
         return false;
     }
 
+    if (force_open_and_switch_tab) {
+        BringVmixWindowToFront(wndCtx.hInputSelect);
+    }
+
     StreamTabControls tabCtrl{};
     EnumChildWindows(wndCtx.hInputSelect, EnumInputSelectChildrenProc, reinterpret_cast<LPARAM>(&tabCtrl));
 
@@ -710,13 +746,15 @@ static bool AutoFillVmixInputSelectWindow(bool force_open_and_switch_tab, bool a
             return false;
         }
 
-        ClickStreamSrtTabInDialog(uia, wndCtx.hInputSelect);
+        for (int attempt = 0; attempt < 2 && !tabCtrl.hStreamTypeCombo; ++attempt) {
+            ClickStreamSrtTabInDialog(uia, wndCtx.hInputSelect);
 
-        for (int retry = 0; retry < 12; ++retry) {
-            Sleep(80);
-            tabCtrl = StreamTabControls{};
-            EnumChildWindows(wndCtx.hInputSelect, EnumInputSelectChildrenProc, reinterpret_cast<LPARAM>(&tabCtrl));
-            if (tabCtrl.hStreamTypeCombo) break;
+            for (int retry = 0; retry < 10; ++retry) {
+                Sleep(80);
+                tabCtrl = StreamTabControls{};
+                EnumChildWindows(wndCtx.hInputSelect, EnumInputSelectChildrenProc, reinterpret_cast<LPARAM>(&tabCtrl));
+                if (tabCtrl.hStreamTypeCombo) break;
+            }
         }
     }
 
