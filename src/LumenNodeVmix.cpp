@@ -222,6 +222,7 @@ static void RebuildFontsForDpi() {
         if (h) SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(g_hFontSmall), TRUE);
     }
 }
+
 static void LayoutControls(int clientW, int clientH) {
     (void)clientH;
     if (!g_hGrpParams) return;
@@ -299,23 +300,23 @@ static void LayoutControls(int clientW, int clientH) {
     MoveWindow(g_hNoteFillAndOk, btn2X + ScaleDpi(2), noteY, btnW - ScaleDpi(4), noteH, TRUE);
 
     // =========================================================================
-    // 卡片 3: OBS Studio (OBS 专用插件一键安装框)
+    // 卡片 3: OBS Studio (OBS 专用插件一键安装框，加高说明文字区防止第 3 行被裁切)
     // =========================================================================
     int card3Top = g_rcCardVmix.bottom + ScaleDpi(14);
-    int card3H = ScaleDpi(112);
+    int card3H = ScaleDpi(118);
     g_rcCardObs = { margin, card3Top, margin + cardW, card3Top + card3H };
 
     if (g_hGrpObs) {
         MoveWindow(g_hGrpObs, leftX + ScaleDpi(8), card3Top + ScaleDpi(12), contentW - ScaleDpi(8), ScaleDpi(20), TRUE);
     }
 
-    int obsBodyY = card3Top + ScaleDpi(46);
+    int obsBodyY = card3Top + ScaleDpi(48);
     int obsBtnW = ScaleDpi(190);
     int obsBtnH = ScaleDpi(40);
     MoveWindow(g_hBtnInstallObs, leftX, obsBodyY, obsBtnW, obsBtnH, TRUE);
 
     int obsDescX = leftX + obsBtnW + ScaleDpi(16);
-    MoveWindow(g_hLblObsStatus, obsDescX, obsBodyY + ScaleDpi(2), rightEdge - obsDescX, ScaleDpi(46), TRUE);
+    MoveWindow(g_hLblObsStatus, obsDescX, card3Top + ScaleDpi(44), rightEdge - obsDescX, ScaleDpi(62), TRUE);
 
     // =========================================================================
     // 底部状态栏框: Status Bar

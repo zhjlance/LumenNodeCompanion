@@ -3,6 +3,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#include <shellapi.h>
 #include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -18,6 +19,7 @@
 
 #pragma comment(lib, "ws2_32.lib")
 #pragma comment(lib, "iphlpapi.lib")
+#pragma comment(lib, "shell32.lib")
 
 // ============================================================================
 // 1. OBS Studio 核心 C ABI 类型声明（免 SDK 头文件直连 obs.dll）
@@ -1167,6 +1169,48 @@ static bool OnScanButtonClicked(obs_properties_t* props, obs_property_t* propert
     return true;
 }
 
+static bool OnOpenWebHudButtonClicked(obs_properties_t* props, obs_property_t* property, void* data) {
+    (void)props;
+    (void)property;
+    auto* ctx = static_cast<LumenSourceContext*>(data);
+    std::string target_ip;
+    int http_port = 8080;
+
+    if (ctx) {
+        target_ip = ctx->phone_ip;
+        if (ctx->http_port > 0 && ctx->http_port <= 65535) {
+            http_port = ctx->http_port;
+        }
+        if (target_ip.empty() && ctx->self && p_obs_source_get_settings) {
+            obs_data_t* settings = p_obs_source_get_settings(ctx->self);
+            if (settings) {
+                const char* manual_ip = p_obs_data_get_string(settings, "manual_ip");
+                if (manual_ip && strlen(manual_ip) > 0) {
+                    target_ip = manual_ip;
+                }
+                int cfg_port = static_cast<int>(p_obs_data_get_int(settings, "http_port"));
+                if (cfg_port > 0 && cfg_port <= 65535) {
+                    http_port = cfg_port;
+                }
+                p_obs_data_release(settings);
+            }
+        }
+    }
+    if (target_ip.empty()) {
+        DiscoveredNodeInfo first_node;
+        if (GetFirstDiscoveredNode(first_node)) {
+            target_ip = first_node.ip;
+            http_port = first_node.http_port;
+        }
+    }
+    if (!target_ip.empty() && target_ip != "0.0.0.0") {
+        char hud_url[256] = { 0 };
+        snprintf(hud_url, sizeof(hud_url), "http://%s:%d", target_ip.c_str(), http_port);
+        ShellExecuteA(nullptr, "open", hud_url, nullptr, nullptr, SW_SHOWNORMAL);
+    }
+    return false;
+}
+
 static obs_properties_t* lumen_source_get_properties(void* data) {
     (void)data;
     obs_properties_t* props = p_obs_properties_create();
@@ -1191,6 +1235,7 @@ static obs_properties_t* lumen_source_get_properties(void* data) {
     }
 
     p_obs_properties_add_button(props, "scan_btn", "Scan LAN & Auto-Fill Parameters", OnScanButtonClicked);
+    p_obs_properties_add_button(props, "open_hud_btn", "Open Web Director's HUD (Browser)", OnOpenWebHudButtonClicked);
 
     obs_property_t* mode_list = p_obs_properties_add_list(
         props, "stream_mode", "Connection Mode", OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_INT);
